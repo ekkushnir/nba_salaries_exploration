@@ -1,0 +1,1453 @@
+NBA Salaries Exploration by Ekaterina Kushnir
+========================================================
+
+This report explores a dataset of NBA salaries for the past ten years 
+and players performance statistics over regular NBA seasons from 2007/2008
+to 2016/2017. The datasets were taken from kaggle.com 
+(https://www.kaggle.com/drgilermo/nba-players-stats/home) and from data.world
+(https://data.world/datadavis/nba-salaries/). The source for both datasets is 
+the website https://www.basketball-reference.com/. The final dataset was merged
+from the datasets described above and filtered so that we have statistics on 
+players performance and their salaries going back 10 years. 
+
+Players performance statistics includes number of games (G), overall minutes 
+played (MP), widely used advanced game statistics such as player efficiency 
+rating (PER), true shooting (TS.), statistics on players perfomance in relation 
+to the number of overall available opportunities (such as blocks, steals, 
+rebounds  percentatges) as well as simple averages per game such as points per
+game (PPG), assists per game (ASTPG), total rebounds per game (TRBPG) etc. 
+Please refer to this glossary for the full list of basketball performance 
+indicators: https://www.basketball-reference.com/about/glossary.html
+
+I filtered the dataset so that only statistics of those players are considered
+who made more than 5 games for a given team in a given season in order to remove 
+outliers.
+
+Furthermore, salaries data was adjusted for inflation and will be presented in
+2018 dollar terms.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages}
+# Load all of the packages
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(memisc)
+library(MASS)
+library(GGally)
+library(scales)
+library(reshape2)
+library(gridExtra)
+library(knitr)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Load_the_Data}
+# Load the Data
+# Load data on seasons statistics and player infromation
+player_data <- read.csv('player_data.csv')
+
+player_data <- player_data %>% 
+  dplyr::select('name', 'year_start', 'year_end') %>% 
+  filter(year_start > 2008 - 21) %>% # longest NBA career is about 21 years
+  dplyr::rename(Player = name)
+
+players <- read.csv('Players.csv') %>% 
+  filter(born > 2008 - 40) # oldest player is Kurt Thomas with 40 years
+
+seasons_stats <- read.csv('Seasons_Stats.csv') %>% 
+  filter(Year >= 2008) 
+
+# merge the data sets, filter and drop variables which won't be needed
+levpl <- unique(c(levels(seasons_stats$Player), 
+                 levels(players$Player)))
+seasons_stats$Player <- factor(seasons_stats$Player, levels = levpl)
+players$Player <- factor(players$Player, levels = levpl)
+seasons_stats <- left_join(players, seasons_stats, by = 'Player')
+
+levpl <- unique(c(levels(seasons_stats$Player), 
+                 levels(player_data$Player)))
+seasons_stats$Player <- factor(seasons_stats$Player, levels = levpl)
+player_data$Player <- factor(player_data$Player, levels = levpl)
+seasons_stats <- left_join(seasons_stats, player_data, by = 'Player')
+
+seasons_stats <- seasons_stats %>% 
+  mutate(X.x = NULL, X.y = NULL, birth_city = NULL, birth_state = NULL,
+         collage = NULL, blanl = NULL, blank2 = NULL)%>% 
+  filter(Year > 2008) %>% 
+  filter(Age < 41) %>% 
+  mutate(career_year = Year - year_start, 
+         age_at_car_start = year_start - born) %>% 
+    dplyr::rename(team = Tm) %>% 
+  filter(age_at_car_start < 40 & Year - year_end < 0 & team != 'TOT')
+
+seasons_stats$team <- dplyr::recode(seasons_stats$team, 
+                                    BRK = 'BKN', CHO = 'CHA', NOP = 'NOH')
+
+# Load and adjust salaries data
+nba_salary <- read.csv('nba_salaries_1990_to_2018.csv')
+
+nba_salary <- nba_salary %>% 
+  dplyr::rename(Player = player, Year = season_start)
+
+nba_salary <- nba_salary %>% 
+  mutate(salary = salary/ 10^6) %>% # show salary in mUSD
+  filter(Year > 2011) %>% 
+  dplyr::select('Player', 'salary', 'Year', 'team')
+
+nba_salary$team <- dplyr::recode(nba_salary$team, NJN = 'BKN')
+
+# Load inflation data, source: IMF inflation rates for the U.S.
+# historical rates 2008 - 2017, forecast 2018
+infl_rates <- c(3.8, -0.3, 1.6,	3.1,	2.1,	1.5,	1.6,	0.1,	1.3,	2.1,	2.5) 
+Year <- seq(2008, 2018, 1)
+infl <- data.frame(Year, infl_rates)
+infl$factor <- with(infl, 1 + infl_rates/100)
+
+for (i in 1:11) {
+    infl$adj[i] <- prod(infl$factor[(i+1):11])
+}
+
+# salaries inflated
+nba_salary <- left_join(nba_salary, infl, by = 'Year')
+nba_salary <- nba_salary %>%  mutate(salary_infl = salary*adj, 
+                                     infl_rates = NULL, factor = NULL)
+
+# join seasons stats and salary data
+levpl <- unique(c(levels(seasons_stats$Player), 
+                 levels(nba_salary$Player)))
+seasons_stats$Player <- factor(seasons_stats$Player, levels = levpl)
+nba_salary$Player <- factor(nba_salary$Player, levels = levpl)
+
+nba_stats_salar <- left_join(seasons_stats, nba_salary,
+                             by = c('Player', 'Year')) %>% 
+  filter(!is.na(salary) & G > 5)
+
+nba_stats_salar <- nba_stats_salar %>% 
+  dplyr::rename(Tm_curr_s = team.x, Tm_next_s = team.y)
+
+# reorder the columns so they are easier to read  
+nba_stats_salar <- nba_stats_salar[, c(1:8, 54:61, 9:53)]
+nba_stats_salar <- nba_stats_salar[, c(1:8, 14, 9:13, 15:61)]
+
+# calculate some more statistics per game
+nba_stats_salar <- nba_stats_salar %>% 
+  mutate(PPG = PTS / G, MPG = MP / G, PFG = PF / G, FTPG = FT / G, 
+         X3PPG = X3P / G, X2PPG = X2P / G, TRBPG = TRB / G, ASTPG = AST / G, 
+         STLPG = STL / G, BLKPG = BLK / G, TOVPG = TOV / G)
+
+# define whether player stayed with the same team since last season
+# set factor levels for both columns, 1  indicates that the player stayed with
+# the team and 0 indicates leaved
+levtm <- unique(c(levels(nba_stats_salar$Tm_curr_s), 
+                 levels(nba_stats_salar$Tm_next_s)))
+nba_stats_salar$Tm_curr_s <- factor(nba_stats_salar$Tm_curr_s, levels = levtm)
+nba_stats_salar$Tm_next_s <- factor(nba_stats_salar$Tm_next_s, levels = levtm)
+nba_stats_salar$stayed <- 
+  ifelse(nba_stats_salar$Tm_curr_s == nba_stats_salar$Tm_next_s, TRUE, FALSE)
+
+# set factor levels for Pos (position)
+nba_stats_salar$Pos <- factor(nba_stats_salar$Pos)
+
+```
+
+# Univariate Plots Section
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_Plots_1}
+# print summaries
+dim(nba_stats_salar)
+str(nba_stats_salar)
+summary(nba_stats_salar)
+
+```
+
+The dataset consists of more than 2,000 observation of 73 variables. We will not
+be exploring all of them however. Some of them were calculated based on others, 
+e.g. field goal percentage (FG.) is calculated using field goals (FG) and field 
+goals attemps (FGA). We will be concentrating on commonly used easy, to 
+understand basketball statistics and additionally have a closer look at some 
+advanced performance statistics. We will try to avoid using variables which are 
+a product of other variables. Variables which we will be exploring are salary 
+adjusted for inflation, career year, player's age, number of games played for 
+the team in a given season, various statistics per game: points, minutes played,
+two and three point field goals, free throws, assists, steals, rebounds, 
+turnovers, blocks. Furthermore, true shooting percentage which represents the
+measure of shooting efficiency and is calculated as a ratio of goals including 
+free throws to attempts made will be explored. Additionally, we will have a look
+at player effeciency rating (PER). Finally, we will look at whether players 
+stayed or leaved the team during or after the season. Since the performance 
+statistics mentioned above are influenced by the position the player, we may 
+increase our understanding of data by looking at statistics for different 
+positions separately later on in the course of the analysis.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_Plots_2}
+# salary histogram
+s1 <- ggplot(aes(x = salary_infl), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 1) + scale_x_continuous(breaks = c(1, 10, 20, 30)) + 
+  ggtitle('Salary histogram')
+
+# salary log transformed histogram
+s2 <- ggplot(aes(x = salary_infl), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) + 
+  scale_x_continuous(trans = log10_trans()) + 
+  ggtitle('Salary histogram log transformed')
+
+# salary sqrt transformed histogram
+s3 <- ggplot(aes(x = salary_infl), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) + 
+  scale_x_continuous(trans = sqrt_trans(), 
+                     breaks = c(0.1, 0.5, 1, 10, 20, 30)) +
+  ggtitle('Salary histogram sqrt transformed')
+
+grid.arrange(s1, s2, s3)
+
+```
+
+Transforming the salary using the square root function allows a more closer look
+at the data in the long tail and appears to result in a bimodal distribution 
+with peaks at around 0.1 million USD and just above 1 million USD. Let's have a 
+look at age and career year of the players.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_PLots_3}
+# Age
+ggplot(aes(x = Age), data = nba_stats_salar) + geom_histogram(binwidth = 1) +
+  scale_x_continuous() + 
+  ggtitle('Age')
+
+```
+
+Players age seems to peak at 23-24 years and starts to decrease from there. 
+There is only a small portion of players aged over 35.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_PLots_4}
+#career year
+ggplot(aes(x = career_year), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 1) +
+  ggtitle('career year')
+
+```
+
+Also most players also appear to be in their early years of NBA career with the 
+largest number of players in their first career year. Number of players in later
+career years gradually decreases. Only a small portion of players achieve a long
+career over 15 years. Let's have a look at performance indicators distributions
+(average statistics per game) next.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=6, Univariate_PLots_5}
+# Simple per game statistics - points
+# Points per game 
+ppg1 <- ggplot(aes(x = PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 1) +
+  scale_x_continuous() + ggtitle('Points per game')
+ 
+ppg2 <- ggplot(aes(x = PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous(trans = sqrt_trans()) + ggtitle('Points per game sqrt')
+
+ppg3 <- ggplot(aes(x = PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous(trans = log_trans()) + ggtitle('Points per game sqrt')
+
+# 2 points goals per game 
+x2ppg1 <- ggplot(aes(x = X2PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous() + ggtitle('2 points goals per game')
+
+x2ppg2 <- ggplot(aes(x = X2PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('2 points goals per game sqrt')
+
+x2ppg3 <- ggplot(aes(x = X2PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('2 points goals per game log')
+
+# 3 points goals per game
+x3ppg1 <- ggplot(aes(x = X3PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous() + ggtitle('3 points goals per game')
+
+x3ppg2 <- ggplot(aes(x = X3PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('3 points goals per game sqrt')
+
+x3ppg3 <- ggplot(aes(x = X3PPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('3 points goals per game log')
+
+# Free throws goals per game 
+ftpg1 <- ggplot(aes(x = FTPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous() + ggtitle('Free throws per game')
+
+ftpg2 <- ggplot(aes(x = FTPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('Free throws per game sqrt')
+
+ftpg3 <- ggplot(aes(x = FTPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('Free throws per game log')
+
+grid.arrange(ppg1, x2ppg1, x3ppg1, ftpg1, 
+             ppg2, x2ppg2, x3ppg2, ftpg2, 
+             ppg3, x2ppg3, x3ppg3, ftpg3, ncol = 4)
+
+```
+
+As we can see from the plots of points related statistics, transforming the 
+scale by the square root and the log functions bring the best view of long 
+tails. Using the square root function with the variables points per game, 2 
+points per game per game delivers a bell shape curve which looks like normal 
+distribution. For the variable 3 points per game we have a surprisingly large 
+number of players who haven't scored a single 3 points goal. For the variable 
+free throws per game the distribution is right skewed with some outliers scoring
+much more free throws than the average. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=12, fig.height=6, Univariate_PLots_6}
+# Assists per game
+astpg1 <- ggplot(aes(x = ASTPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous() + 
+  ggtitle('Assists per game')
+
+astpg2 <- ggplot(aes(x = ASTPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('Assists per game sqrt')
+
+astpg3 <- ggplot(aes(x = ASTPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('Assists per game log')
+
+# Steals per game
+stlpg1 <- ggplot(aes(x = STLPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous() + 
+  ggtitle('Steals per game')
+
+stlpg2 <- ggplot(aes(x = STLPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.05) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('Steals per game sqrt')
+
+stlpg3 <- ggplot(aes(x = STLPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('Steals per game log')
+
+# Total rebounds per game
+trbpg1 <- ggplot(aes(x = TRBPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous() + 
+  ggtitle('Total rebounds per game')
+
+trbpg2 <- ggplot(aes(x = TRBPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('Total rebounds per game sqrt')
+
+trbpg3 <- ggplot(aes(x = TRBPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('Total rebounds per game log')
+
+# Blocks per game
+blkpg1 <- ggplot(aes(x = BLKPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous() + 
+  ggtitle('Blocks per game')
+
+blkpg2 <- ggplot(aes(x = BLKPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.05) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('Blocks per game sqrt')
+
+blkpg3 <- ggplot(aes(x = BLKPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('Blocks per game log')
+
+grid.arrange(astpg1, stlpg1, trbpg1, blkpg1, 
+             astpg2, stlpg2, trbpg2, blkpg2,
+             astpg3, stlpg3, trbpg3, blkpg3,
+             ncol=4)
+
+```
+
+By plotting further important basketball statistics such as assists, steals, 
+total rebounds and blocks we see a similar picture as for the scoring 
+statistics: transforming the scale using the square root and the log function 
+helps to understand longer right tales. With blocks we see a similar story as 
+with 3 point goals: there is a large number of players who blocked no shots. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_PLots_7}
+
+# Turnovers per game
+tovg1 <- ggplot(aes(x = TOVPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous() + 
+  ggtitle('Turnovers per game')
+
+tovg2 <- ggplot(aes(x = TOVPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('Turnovers per game sqrt')
+
+tovg3 <- ggplot(aes(x = TOVPG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('Turnovers per game log')
+
+
+# Personal fouls per game
+pfpg1 <- ggplot(aes(x = PFG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) +
+  scale_x_continuous() + 
+  ggtitle('Personal fouls per game')
+
+pfpg2 <- ggplot(aes(x = PFG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = sqrt_trans()) + 
+  ggtitle('Personal fouls per game sqrt')
+
+pfpg3 <- ggplot(aes(x = PFG), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.1) +
+  scale_x_continuous(trans = log_trans()) + 
+  ggtitle('Personal fouls per game log')
+
+grid.arrange(pfpg1, tovg1, pfpg2, tovg2, pfpg3, tovg3, ncol = 2)
+
+```
+
+Lastly, there are plots of negative performance indicators, personal fouls and
+turnovers. Personal fouls per game distribution already has a bell curve shape 
+without transforming the scale. Turnovers which indicate loosing the ball are
+distributed in a bell curve shape after transforming the scale by using a square 
+root function.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_PLots_8}
+# Advanced statistic
+# Effective field goal percentage
+efg <- ggplot(aes(x = eFG.), data = nba_stats_salar) +
+  geom_histogram(binwidth = 0.01) + 
+  scale_x_continuous()
+
+# True shooting percentage
+ts <- ggplot(aes(x = TS.), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.01) + 
+  scale_x_continuous()
+
+grid.arrange(efg, ts)
+
+```  
+
+As for effective field goal and true shooting they both look like a bell curve
+with high kurtosis with the most common values about 0.5 for effective field
+goal and slightly above 0.5 for true shooting. This makes sense since effective
+field goal percentage takes into account shots accuracy using shots from the
+field only (both 2 and 3 points shots) and true shooting additionally considers 
+shots accuracy of free throws. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_PLots_9}
+# Player efficiency rating 
+ggplot(aes(x = PER), data = nba_stats_salar) + geom_histogram(binwidth = 1) + 
+  scale_x_continuous(breaks = c(-20, 0, 10, 15, 20, 30, 40))
+
+```
+
+Finally, from the player efficiency rating distribution plot we can conclude 
+that the most common PER level lies between 10 and 15 and only few player have 
+achieved a PER above 20. PER is widely used indicator of player's performance. 
+PER is calculated using a specially developed formula taking into account a wide
+range of performance indicators of an individuall player adjusted by specially 
+developed factors. Please refer to 
+https://www.basketball-reference.com/about/per.html for further details.
+
+Let's have a look at salary distribution of player with PER below 15 as well as
+above 20 together with the salary histogram of all players.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_Plots_10}
+# salary histogram
+s_all <- ggplot(aes(x = salary_infl), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 1) + 
+  scale_x_continuous(breaks = c(0, 10, 20, 30), limits = c(0, 40)) + 
+  ggtitle('Salary histogram - all')
+
+# Player efficiency rating below or equal 20 
+s_low <- ggplot(aes(x = salary_infl), 
+                data = subset(nba_stats_salar, PER <= 20)) + 
+  geom_histogram(binwidth = 0.5) + 
+  scale_x_continuous(breaks = c(0, 10, 20, 30), 
+                     limits = c(0, 40)) + 
+  ggtitle('Salary histogram with PER at or below 20')
+
+# Player efficiency rating above 20
+s_high <- ggplot(aes(x = salary_infl), 
+                 data = subset(nba_stats_salar, PER > 20)) + 
+  geom_histogram(binwidth = 1.5) + 
+  scale_x_continuous(breaks = c(0, 10, 20, 30), 
+                     limits = c(0, 40)) + 
+  ggtitle('Salary histogram with PER over 20')
+
+grid.arrange(s_all, s_low, s_high)
+
+```
+
+The salaries histogram for lower performing players assembles the
+salaries histogramm for all players but has a less fatter tail. The salaries of 
+players with the best performance reach along the range from just below 1 
+million USD up to more than 30 million USD: there are still a high number of
+best perfoming players earning comparably low salaries while only few reach a 
+salary above 30 million USD.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_Plots_11}
+
+summary(subset(nba_stats_salar, PER <= 20, select=salary_infl))
+summary(subset(nba_stats_salar, PER > 20, select=salary_infl))
+
+```
+
+We can see that ranges of salaries for players with PER above 20 and below or at
+20 differ a lot. Also the mean salaries of players with PER above 20 amounts to 
+approx. 15.9 million USD which is much higher than the mean salary of players 
+with PER below 10 which is only about 5.1 million USD.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Univariate_Plots_12}
+# Players staying or leaving current team
+table(nba_stats_salar$stayed)
+
+```
+
+Overall, over the past ten years 984 players changed their teams during or
+after the season, 1270 stayed with the same team as in the previous season. 
+I wonder if changing teams is linked to player's salary.
+
+# Univariate Analysis
+
+### What is the structure of your dataset?
+
+The dataset contains data on the past 10 NBA seasons including different 
+performance indicators and players data. Overall, there are 2254 ovservations. 
+The dataset is structured in such a way that performance statistics of a given 
+season corresponds to a player's salary in the next season since salaries in the 
+NBA are determined before the season start. The mean salary (adjusted for
+inflation is 6 million USD and the median salary is 3.5 million USD. Mean 
+players age is 26 years and mean career length among active players over the 
+last ten years is about 4.8 years. Performance statistics such points from the
+field, free throws, blocks, steals, assists, turnovers, rebounds all have long 
+right tail resulting in a small number of players outscoring the average. 
+
+### What is/are the main feature(s) of interest in your dataset?
+
+The main features in the data set are players salaries along with different
+performance indicators. Here salary level differs dramatically starting from 
+less than one million USD up to over 30 millions USD. I would like to determine 
+how players performance is linked to their salary level.
+
+### What other features in the dataset do you think will help support your \
+investigation into your feature(s) of interest?
+
+Other features which may be linked to the salary level are player's age and
+experience in the NBA as well as whether the player stays with the same team as 
+in the previous season.
+
+### Did you create any new variables from existing variables in the dataset?
+
+I created variables indicating per game performance since in the starting 
+datasets only overall performance of the player for a team in a given season was
+given along with the number of games. I also created a variable named 'stayed' 
+indicating whether the player stayed with the same team as in the previous
+season.
+
+### Of the features you investigated, were there any unusual distributions? \
+Did you perform any operations on the data to tidy, adjust, or change the form \
+of the data? If so, why did you do this?
+
+I adjusted the data by matching salaries data with games statistics and filtered 
+the data so that only observation with more than 5 games per season are 
+considered in order to remove outliers. Furthermore, I adjusted salary data for 
+inflation since the players performance indicators are comparable over the years
+(at least given that the rules of the game are not changed significantly which 
+is the case for the time frame being explored).
+
+# Bivariate Plots Section
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_1}
+# correlation matrix
+nba_stats_salar_c <- nba_stats_salar %>% 
+  dplyr::select('salary_infl', 'Age', 'career_year', 'PPG', 'MPG', 'FTPG', 
+                'ASTPG', 'STLPG', 'TRBPG', 'BLKPG', 'TOVPG', 'PFG', 'eFG.',
+                'TS.', 'PER')
+
+cor(nba_stats_salar_c)
+
+```
+
+Salary is most correlated with points per game, minutes played, total rebounds
+per game and PER. Also minutes played per game correlated strongly with many
+'per game' - indicators which makes sense since players have more chances to 
+score, assist etc. if they play more. At the same time number of blocks per game 
+and shooting accuracy represented by effective field goal and true shooting
+percentage are not strongly related to the number of minutes played. Number of
+personal fouls per game is correlated most with rebounds which makes also sense 
+since rebounding fouls are common. Turnovers are also strongly correlated with
+points per game which is a bit surprising to me and I don't have a good 
+explanation for that. It might be that players having the ball most of the time
+make many points and at the same time have a higher chance of loosing the ball.
+Age and career year show only poor correlations with salary as well as with 
+players perfomance indicators, so experience surely helps in many aspects of the
+game but we cannot yet see it from the variables under our exploration here.
+Lets have a closer look at some per game indicators using a plot matrix.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=10, Bivariate_Plots_2}
+# ggpairs matrix
+nba_stats_salar_f <- nba_stats_salar %>% 
+  dplyr::select('salary_infl', 
+                'PPG', 'MPG', 'FTPG', 'ASTPG', 'STLPG', 
+                'TRBPG', 'BLKPG')
+
+ggpairs(nba_stats_salar_f, 
+        lower = list(continuous = wrap("points", shape = I('.'))),
+        upper = list(combo = wrap("points", outlier.shape = I('.'))))
+
+```
+
+I tried to build a linear regression model from some of the variables for
+predicting salaries which will be introduced in the multvariate analysis 
+section. I didn't use variables which obviously influence each other, e.g. I
+didn't use the variable minutes per game (MPG), since it influences other 
+variables such as points per game (PPG) or 2 points per game (X2PPG). This is 
+also the reason why I didn't use player efficiency rating (PER) since it is 
+calculated using other variables I used for my modell, although it has a high
+correlation with salary as can be seen from the correlation matrix above.  
+
+Since the plots presented above just use a linear scale I wonder how the
+relationship between salary and performance indicators would look like when
+ajdusting the scale using log or square root function, since as we've seen in
+the section on univariate plots some variables are better explored by adjusting
+the scale.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=5, fig.height=10, Bivariate_Plots_3}
+# Relationships between salary and performance statistics
+# Salary and 2 points goals per game 
+s_x2ppg <- ggplot(aes(x = X2PPG, y = salary_infl), data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(trans = sqrt_trans(), 
+                     limits = c(quantile(nba_stats_salar$X2PPG, 0.01), 
+                             quantile(nba_stats_salar$X2PPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), 
+                     limits = c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                             quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. 2 points goals per game sqrt') +
+  geom_smooth(method = 'lm')
+
+# Salary and 3 points goals per game
+s_x3ppg <- ggplot(aes(x = X3PPG, y = salary_infl), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + scale_x_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$X2PPG, 0.01), 
+                             quantile(nba_stats_salar$X2PPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                             quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. 3 points goals per game sqrt') +
+  geom_smooth(method = 'lm')
+
+# Salary and Free throws goals per game
+s_ftpg <- ggplot(aes(x = FTPG, y = salary_infl), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + 
+  scale_x_continuous(trans = log_trans()) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                             quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. free throws per game log') +
+  geom_smooth(method = 'lm')
+
+grid.arrange(s_x2ppg, s_x3ppg, s_ftpg)
+
+```
+
+From the scoring indicators, 2 point goals and free point goals are mostly 
+related to the salary. 3 point goals are not strongly related to the salary:
+there are many players with relatively high salary and relatively low 3 
+points scoring. Remember, from the histogram plot of 3 point goals we learned 
+that there are many players who didn't score a single 3 pointer per game.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=20/3, Bivariate_Plots_4}
+# Salary and Assists per game
+s_astpg <- ggplot(aes(x = ASTPG, y = salary_infl), data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(trans = log_trans(), limits = 
+                                     c(quantile(nba_stats_salar$ASTPG, 0.01), 
+                                       quantile(nba_stats_salar$ASTPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Assists per game log') +
+  geom_smooth(method = 'lm')
+
+# Salary and Steals per game
+s_stlpg <- ggplot(aes(x = STLPG, y = salary_infl), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + scale_x_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$STLPG, 0.01), 
+                         quantile(nba_stats_salar$STLPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Steals per game sqrt') +
+  geom_smooth(method = 'lm')
+
+# Salary and Total rebounds per game
+s_trbpg <- ggplot(aes(x = TRBPG, y = salary_infl), data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(trans = log_trans(), limits = 
+                       c(quantile(nba_stats_salar$TRBPG, 0.01), 
+                         quantile(nba_stats_salar$TRBPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Total rebounds per game sqrt') +
+  geom_smooth(method = 'lm')
+
+# Salary and Blocks per game
+s_blkpg <- ggplot(aes(x = BLKPG, y = salary_infl), data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(trans = log_trans()) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Blocks per game log') +
+  geom_smooth(method = 'lm')
+
+grid.arrange(s_astpg, s_stlpg, s_trbpg, s_blkpg)
+
+```
+
+Among other performance indicators total rebounds have the strongest 
+relationship with the salary.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=5, fig.height=10, Bivariate_Plots_5}
+# Salary and Turnovers per game
+s_tovpg <- ggplot(aes(x = TOVPG, y = salary_infl), data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(trans = log_trans(), limits = 
+                       c(quantile(nba_stats_salar$TOVPG, 0.01), 
+                         quantile(nba_stats_salar$TOVPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Total rebounds per game log') +
+  geom_smooth(method = 'lm')
+# Salary and Personal fouls per game
+s_pfg <- ggplot(aes(x = PFG, y = salary_infl), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + scale_x_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$PFG, 0.01), 
+                         quantile(nba_stats_salar$PFG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Personal fouls per game sqrt') +
+  geom_smooth(method = 'lm')
+
+grid.arrange(s_tovpg, s_pfg)
+
+```
+
+Interestingly, negative performance represented by the number of turnovers per 
+game and personal fouls per game also positively related to the salary.
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=5, fig.height=10, Bivariate_Plots_6}
+# Salary and Advanced statistic
+# Salary and Effective field goal percentage
+s_efg <- ggplot(aes(x = eFG., y = salary_infl), data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(limits = 
+                       c(quantile(nba_stats_salar$eFG., 0.01), 
+                         quantile(nba_stats_salar$eFG., 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Effective field goal percentage') +
+  geom_smooth(method = 'lm')
+
+# Salary and True shooting percentage
+s_ts <- ggplot(aes(x = TS., y = salary_infl), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + scale_x_continuous(limits = 
+                       c(quantile(nba_stats_salar$TS., 0.01), 
+                         quantile(nba_stats_salar$TS., 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. True Shooting') +
+  geom_smooth(method = 'lm')
+
+grid.arrange(s_efg, s_ts)
+
+```
+
+Plotting the shooting accuracy variables effective field goal percentage and 
+true shooting reveals that there are very few players whos shooting accuracy is 
+low but salary is high (the upper left corners of the both plots have only few 
+points). At the same time there are plenty players whos shooting accuracy is 
+relatively high but the salary is low.
+
+Next, let us look at categorical variables such as position and staying with the
+team and salary distribution across them. Additionally let's look at salary vs. 
+age and career year using box plots which might deliver a better view than 
+points plot.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_7}
+# Box plot stayed
+boxplot(salary_infl ~ stayed , data = nba_stats_salar, 
+        main = 'Salary and staying with the same team', 
+        xlab = 'Stayed', ylab = 'Salary')
+
+```
+
+It looks like staying with the same team is connected to a bigger salary 
+measured by mean salary and 3rd quartile where both are higher for those who 
+stay. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_8}
+# Box plot career year
+boxplot(salary_infl ~ career_year , data = nba_stats_salar, 
+        main = 'Salary by career year', 
+        xlab = 'career year', ylab = 'Salary')
+
+```
+
+Also in the first three career years salaries are smaller than in later 
+years. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_9}
+# Salary box plots
+# Box plot position
+boxplot(salary_infl ~ Pos , data = nba_stats_salar, main = 'Salary by position', 
+        xlab = 'Position', ylab = 'PPG')
+```
+
+Differences in salaries between positions also exist. Now let us look into the 
+position variable in more detail. Who scores most points? 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_10}
+# box plots by position
+boxplot(PPG ~ Pos , data = nba_stats_salar, main = 'Points by position', 
+        xlab = 'Position', ylab = 'PPG')
+
+```
+
+It looks like point guards and shooting guards score most on average, which 
+makes sense, although the difference to other positions is not dramatically 
+large. Who does most rebounding?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_11}
+
+boxplot(TRBPG ~ Pos , data = nba_stats_salar, 
+        main = 'Total rebounds by position', xlab = 'Position', 
+        ylab = 'Total rebounds per game')
+
+```
+
+Do different positions require different physical characterics like 
+height and weight?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_12}
+boxplot(height ~ Pos , data = nba_stats_salar, main = 'Height by position', 
+        xlab = 'Position', 
+        ylab = 'Height')
+
+boxplot(weight ~ Pos , data = nba_stats_salar, main = 'Weight by position', 
+        xlab = 'Position', 
+        ylab = 'Weight')
+
+```
+
+Big guys like center and power forwards rebound most which is also no
+surpise. Finally, do experienced players score more or draw more fouls?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_13}
+# plots points and free throws per game by career year
+boxplot(PPG ~ career_year, data = nba_stats_salar, 
+        main = 'Points per game by career year', xlab = 'career year', 
+        ylab = 'PPG')
+
+boxplot(FTPG ~ career_year, data = nba_stats_salar, 
+        main = 'Free throws by career year', xlab = 'career year', 
+        ylab = 'Free throws per game')
+
+
+```
+
+Maybe the reason for younger players to score less is having less time to 
+score?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_14}
+# minutes per game by career year
+boxplot(MPG ~ career_year, data = nba_stats_salar, 
+        main = 'Minutes played by career year', xlab = 'career year', 
+        ylab = 'Minutes played per game')
+```
+
+To see if it's true let us proof whether this difference still exists when
+points per minute instead of points per game and plot it by career year.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Bivariate_Plots_15}
+# Create and plot new variable minutes per game by career year
+nba_stats_salar$points_per_min <- with(nba_stats_salar, PPG/MPG) 
+
+boxplot(points_per_min ~ career_year, data = nba_stats_salar, 
+        main = 'Points per min by career year', xlab = 'career year', 
+        ylab = 'Points per min')
+
+```
+
+Here we saw that players in their first and second career years seem to have a 
+more cautious game drawing less fouls and thus having less free throws per game
+as well as less points per game. One part of it can be explained by the fact 
+that younger players spent less minutes on the field indicated by minutes per 
+game by career year vs. minutes plot. Plotting points per minute for different 
+career years reveals that the difference in points in first two years is not 
+that big although it exists. Finally, for players who have passed their 10th
+career year it is harder to make average judgements since there are fewer data
+points for those as we saw by plotting the career year variable in the 
+univariate plots section above.
+
+I wonder how performance indicators and their relation to the salary variable
+explored above for all players look differently for different positions. Let us 
+have a closer look at it later in the multivariate analysis chapter.
+
+# Bivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the \
+investigation. How did the feature(s) of interest vary with other features in \
+the dataset?
+
+I observed some interesting relationships between salary level and game 
+performance indicators. In most cases relationships observed are not linear. 
+Relationships between salary and players experience expressed by age and career 
+year varibale were not as strong as I expected.
+
+### Did you observe any interesting relationships between the other features \
+(not the main feature(s) of interest)?
+
+To get a better understanding about the data I looked at how two important 
+variables, points per game and number of free throws, are different for 
+different career years by creating box plots. Both plots revealed that in the
+beginning of the career players have lower number of overall points and free 
+throws per game. Then I created a plot of number of minutes played for different
+career years which revealed to me a similar pattern: players with less
+experience in the NBA spent less time in the game which may explain their lower
+scoring. Plotting points per minute reveals that the difference in scoring for
+younger players is not that big although it still exists.
+
+### What was the strongest relationship you found?
+
+The strongest relationship observed was between salary and points per game with 
+the correlation of approximately 0.69. Number of free throws per game and total
+rebounds per game had second and third largest correlations with salary from all
+the variables explored so far.  
+
+# Multivariate Plots Section
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_1}
+# density of salary by position and stayed variable plots
+ggplot(aes(salary, color = Pos), data = nba_stats_salar) +
+  geom_density() + scale_x_continuous(breaks = c(5, 10, 15, 20, 25, 30))
+```
+
+There are less center players who earn under 5 million USD than other players. 
+There are more shooting guards than other players who earn under 2.5 million 
+USD and there are less shooting guard players who earn between 12.5 and 20 
+million than other positions.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_2}
+
+ggplot(aes(salary, color = stayed), data = nba_stats_salar) +
+  geom_density() + scale_x_continuous(breaks = c(5, 10, 15, 20, 25, 30))
+
+```
+
+Among those who earn above 2.5 million USD there are less players who change 
+teams than there are players who stay.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=6.5, fig.height=15, Multivariate_Plots_3}
+# Salary and 2 Points per game 
+s_x2ppg_p <- ggplot(aes(x = X2PPG, y = salary_infl, color = stayed), 
+       data = nba_stats_salar) + 
+  geom_jitter(alpha = 0.25) + 
+  scale_x_continuous(limits = c(quantile(nba_stats_salar$X2PPG, 0.01), 
+                             quantile(nba_stats_salar$X2PPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), 
+                     limits = c(quantile(nba_stats_salar$salary_infl, 0.01),
+                             quantile(nba_stats_salar$salary_infl, 0.99))) +
+  ggtitle('Salary sqrt vs. 2 Points per game') + geom_smooth(method = 'lm') +
+  facet_wrap(~Pos) + 
+  theme(legend.position = c(0.88,0.12))
+
+# Salary and 3 Points per game 
+s_x3ppg_p <- ggplot(aes(x = X3PPG, y = salary_infl, color = stayed), 
+       data = nba_stats_salar) + 
+  geom_jitter(alpha = 0.25) + 
+  scale_x_continuous(limits = c(quantile(nba_stats_salar$X3PPG, 0.01), 
+                             quantile(nba_stats_salar$X3PPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), 
+                     limits = c(quantile(nba_stats_salar$salary_infl, 0.01),
+                             quantile(nba_stats_salar$salary_infl, 0.99))) +
+  ggtitle('Salary sqrt vs. 3 Points per game') + geom_smooth(method = 'lm') +
+  facet_wrap(~Pos)  + 
+  theme(legend.position = c(0.88,0.12))
+
+# Salary and Free throws per game 
+s_fppg_p <- ggplot(aes(x = FTPG, y = salary_infl, color = stayed), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + 
+  scale_x_continuous() + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                             quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. free throws per game') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos) + 
+  theme(legend.position = c(0.88,0.12))
+
+grid.arrange(s_x2ppg_p, s_x3ppg_p, s_fppg_p, ncol=1)
+
+```
+
+From the plots of the scoring indicators variables by position we can conclude 
+that relationships between 2 point goals and free throws definetly there
+independet from players positions. As for the 3 point goals variable where we 
+saw before that there is no such strong relationship, we now know this is mainly
+because of center players. For point guards the number of 3 point goals is
+somewhat related to the salary as shown in the plot.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=6.5, fig.height=20, Multivariate_Plots_4}
+# Salary and Total rebounds per game
+s_trbpg_p <- ggplot(aes(x = TRBPG, y = salary_infl, color = stayed), 
+       data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(limits = 
+                       c(quantile(nba_stats_salar$TRBPG, 0.01), 
+                         quantile(nba_stats_salar$TRBPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Total rebounds per game') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos) + 
+  theme(legend.position = c(0.88,0.12))
+
+# Salary and Assists per game
+s_astpg_p <- ggplot(aes(x = ASTPG, y = salary_infl, color = stayed), 
+       data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(limits = 
+                                     c(quantile(nba_stats_salar$ASTPG, 0.01), 
+                                       quantile(nba_stats_salar$ASTPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Assists per game') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos) + 
+  theme(legend.position = c(0.88,0.12))
+
+# Salary and Steals per game
+s_stlpg_p <- ggplot(aes(x = STLPG, y = salary_infl, color = stayed), 
+       data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + scale_x_continuous(limits = 
+                       c(quantile(nba_stats_salar$STLPG, 0.01), 
+                         quantile(nba_stats_salar$STLPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Steals per game') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos) + 
+  theme(legend.position = c(0.88,0.12))
+
+# Salary and blocks per game
+s_blkpg_p <- ggplot(aes(x = BLKPG, y = salary_infl, color = stayed), 
+       data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(limits = 
+                       c(quantile(nba_stats_salar$BLKPG, 0.01), 
+                         quantile(nba_stats_salar$BLKPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Total blocks per game') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos) + 
+  theme(legend.position = c(0.88,0.12))
+
+grid.arrange(s_trbpg_p, s_astpg_p, s_stlpg_p, s_blkpg_p, ncol=1)
+
+```
+
+Now we see that the variables rebounds per game and blocks per game are those
+which are related to center players salary. At the same time blocks are not 
+important for shooting guards. Even if the relationship exists for multiple 
+players positions such as in case of assists for point guards, shooting guards 
+and small forwards, the relationships is differently important for different
+positions.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=6.5, fig.height=10, Multivariate_Plots_5}
+# Salary and Turnovers per game
+s_tovpg_p <- ggplot(aes(x = TOVPG, y = salary_infl, color = stayed), 
+       data = nba_stats_salar) + 
+ geom_jitter(alpha = 0.25) + scale_x_continuous(trans = log_trans(), limits = 
+                       c(quantile(nba_stats_salar$TOVPG, 0.01), 
+                         quantile(nba_stats_salar$TOVPG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Total turnovers per game log') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos)  + 
+  theme(legend.position = c(0.88,0.12))
+
+# Salary and Personal fouls per game
+s_pfg_p <- ggplot(aes(x = PFG, y = salary_infl, color = stayed), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + scale_x_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$PFG, 0.01), 
+                         quantile(nba_stats_salar$PFG, 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. Personal fouls per game sqrt') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos)  + 
+  theme(legend.position = c(0.88,0.12))
+
+grid.arrange(s_tovpg_p, s_pfg_p, ncol=1)
+
+```
+
+Again, with negative performance indicators, personal fouls per game and 
+turnovers per game across positions we see the same positive relationship with 
+the salary as for all players together.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=6.5, fig.height=5, Multivariate_Plots_6}
+# Salary and True shooting percentage
+ggplot(aes(x = TS., y = salary_infl, color = stayed), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + scale_x_continuous(limits = 
+                       c(quantile(nba_stats_salar$TS., 0.01), 
+                         quantile(nba_stats_salar$TS., 0.99))) + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                         quantile(nba_stats_salar$salary_infl, 0.99))) + 
+  ggtitle('Salary sqrt vs. True Shooting') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos) + 
+  theme(legend.position = c(0.88,0.12))
+
+```
+Lastly, for true shooting we see almost no relationship with salary for center 
+players and some relationship for point guards and shooting guards.
+
+Plots of salary vs. game performance indicators by position divided into two
+groups (those who stayed and those who left) reveal different picture for 
+different positions and stayed / left group. Therefore not all indicators are 
+best suited to be used widely across different positions to evaluate players 
+performance. In many cases in the above plots the smoothing line for those who 
+change teams is below for those who stay which means that the variable stayed 
+could be also used for the salaries forecasting considerations.
+
+I tried to build a linear regression for predicting salary based on average per
+game performance indicators described above. I also included the categorical
+variable 'stayed' into the modell as well as career year variable. Let us look 
+at how the modell works for all players as well as for different positions 
+separately by subseting the data. Firstly, I subset the data by setting game 
+performance indicators which will be used in the regression by setting them
+above zero since some variables will be adjusted using the log function.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_7}
+# first subset the data setting variable values above zero, since some of them 
+# will be transformed using log function
+nba_stats_salar_non_zero <- nba_stats_salar %>% 
+  filter(FTPG > 0 & X2PPG > 0 & X3PPG > 0 & TRBPG > 0 & ASTPG > 0 & STLPG > 0 &
+           TOVPG > 0 & PFG > 0 & BLKPG > 0 & TS. > 0)
+
+dim(nba_stats_salar_non_zero)
+summary(nba_stats_salar_non_zero)
+
+```
+
+##### Modell for all players positions
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_8}
+# all players
+m1 <- lm(I(sqrt(salary_infl)) ~ I(career_year), 
+         data = nba_stats_salar_non_zero)
+m2 <- update(m1, ~ . + stayed) 
+m3 <- update(m2, ~ . + FTPG) 
+m4 <- update(m3, ~ . + X2PPG)
+m5 <- update(m4, ~ . + X3PPG)
+m6 <- update(m5, ~ . + TRBPG)
+m7 <- update(m6, ~ . + ASTPG)
+m8 <- update(m7, ~ . + STLPG)
+m9 <- update(m8, ~ . + log(TOVPG))
+m10 <- update(m9, ~ . + sqrt(PFG))
+m11 <- update(m10, ~ . + BLKPG)
+m12 <- update(m11, ~ . + TS.)
+mtable(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12)
+
+```
+
+##### Modell for Center
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_9}
+# modell Center
+m1 <- lm(I(sqrt(salary_infl)) ~ I(career_year), 
+         data = subset(nba_stats_salar_non_zero, Pos == 'C'))
+m2 <- update(m1, ~ . + stayed) 
+m3 <- update(m2, ~ . + FTPG) 
+m4 <- update(m3, ~ . + X2PPG)
+m5 <- update(m4, ~ . + X3PPG)
+m6 <- update(m5, ~ . + TRBPG)
+m7 <- update(m6, ~ . + ASTPG)
+m8 <- update(m7, ~ . + STLPG)
+m9 <- update(m8, ~ . + log(TOVPG))
+m10 <- update(m9, ~ . + sqrt(PFG))
+m11 <- update(m10, ~ . + BLKPG)
+m12 <- update(m11, ~ . + TS.)
+mtable(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12)
+
+```
+
+##### Modell for Point Guard
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_10}
+# modell Point Guard
+m1 <- lm(I(sqrt(salary_infl)) ~ I(career_year), 
+         data = subset(nba_stats_salar_non_zero, Pos == 'PG'))
+m2 <- update(m1, ~ . + stayed) 
+m3 <- update(m2, ~ . + FTPG) 
+m4 <- update(m3, ~ . + X2PPG)
+m5 <- update(m4, ~ . + X3PPG)
+m6 <- update(m5, ~ . + TRBPG)
+m7 <- update(m6, ~ . + ASTPG)
+m8 <- update(m7, ~ . + STLPG)
+m9 <- update(m8, ~ . + log(TOVPG))
+m10 <- update(m9, ~ . + sqrt(PFG))
+m11 <- update(m10, ~ . + BLKPG)
+m12 <- update(m11, ~ . + TS.)
+mtable(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12)
+
+```
+
+##### Modell for Shooting Guard
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_11}
+# modell Shooting Guard
+m1 <- lm(I(sqrt(salary_infl)) ~ I(career_year), 
+         data = subset(nba_stats_salar_non_zero, Pos == 'SG'))
+m2 <- update(m1, ~ . + stayed) 
+m3 <- update(m2, ~ . + FTPG) 
+m4 <- update(m3, ~ . + X2PPG)
+m5 <- update(m4, ~ . + X3PPG)
+m6 <- update(m5, ~ . + TRBPG)
+m7 <- update(m6, ~ . + ASTPG)
+m8 <- update(m7, ~ . + STLPG)
+m9 <- update(m8, ~ . + log(TOVPG))
+m10 <- update(m9, ~ . + sqrt(PFG))
+m11 <- update(m10, ~ . + BLKPG)
+m12 <- update(m11, ~ . + TS.)
+mtable(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12)
+
+```
+
+##### Modell for Power Forward
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_12}
+# modell Power Forward
+m1 <- lm(I(sqrt(salary_infl)) ~ I(career_year), 
+         data = subset(nba_stats_salar_non_zero, Pos == 'PF'))
+m2 <- update(m1, ~ . + stayed) 
+m3 <- update(m2, ~ . + FTPG) 
+m4 <- update(m3, ~ . + X2PPG)
+m5 <- update(m4, ~ . + X3PPG)
+m6 <- update(m5, ~ . + TRBPG)
+m7 <- update(m6, ~ . + ASTPG)
+m8 <- update(m7, ~ . + STLPG)
+m9 <- update(m8, ~ . + log(TOVPG))
+m10 <- update(m9, ~ . + sqrt(PFG))
+m11 <- update(m10, ~ . + BLKPG)
+m12 <- update(m11, ~ . + TS.)
+mtable(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12)
+
+```
+
+##### Modell for Small Forward
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Multivariate_Plots_13}
+# modell Small Forward
+m1 <- lm(I(sqrt(salary_infl)) ~ I(career_year), 
+         data = subset(nba_stats_salar_non_zero, Pos == 'SF'))
+m2 <- update(m1, ~ . + stayed) 
+m3 <- update(m2, ~ . + FTPG) 
+m4 <- update(m3, ~ . + X2PPG)
+m5 <- update(m4, ~ . + X3PPG)
+m6 <- update(m5, ~ . + TRBPG)
+m7 <- update(m6, ~ . + ASTPG)
+m8 <- update(m7, ~ . + STLPG)
+m9 <- update(m8, ~ . + log(TOVPG))
+m10 <- update(m9, ~ . + sqrt(PFG))
+m11 <- update(m10, ~ . + BLKPG)
+m12 <- update(m11, ~ . + TS.)
+mtable(m1, m2, m3, m4, m5, m6, m7, m8, m9, m10, m11, m12)
+
+```
+
+The modell explains only just about 59 % of the salary variable 
+indicated by R^2 of 0.59. There are seem to be factors explaining the 
+salary level other than players performance on the field. The modell works best 
+for power forwards and point guards, the respective R^2 of 0.628 and 0.632 
+are the largest compared to other positions. The modell for center players has
+the lowest R^2 with 0.537. First, by subsetting the data and setting per game 
+performance statistic larger than zero, we are left with only 135 center players
+out of 438 in the original data frame since many of them might have not scored a
+single 2 or 3 points goal for example. Their performance is better measured by
+rebounds or blocks, there could be some other indicators of their performance 
+not analyzed here. The modell is obviously not optimal, but still is able to 
+show that players perfomance in the game is related to their salary level 
+although there are obviously some other factors involved such as salary cap and 
+negotiation ability which may be connected to players salary.
+
+# Multivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the \
+investigation. Were there features that strengthened each other in terms of \
+looking at your feature(s) of interest?
+
+As you can see from last plots by position in the multivariate analysis section,
+some game performance indicators show a more or less linear relationships with
+salary variable, e.g. points per game variable. Some of them show less linear 
+and less stronger relationships or no relationship at all e.g. 3 points per 
+game for center players. Different variables work differently for different 
+players. So I tried to create a linear modell using most of the variables 
+explored above and then test it for different players positions.
+
+### Were there any interesting or surprising interactions between features?
+
+Ranges of variables vary across positions. For example the range of assits per 
+game for centers is about one and a half times as small as for point guards. 
+This makes sense since point guards are those who handle the ball most and 
+initiate the offense as opposed to center players. This range difference 
+can be also seen for some other variables across different positions.
+
+### OPTIONAL: Did you create any models with your dataset? Discuss the \
+strengths and limitations of your model.
+
+Yes, I created a linear modell which tries to explain players salary through 
+variables of his game performance. These variables describe shooting perfomance, 
+defence performance and so on. Since different positions have different focus
+(offence, defence, assists, rebounding etc.) for every position different
+variables work differently and have different R^2 outcomes. The modell for all 
+players has an R^2 of about 59%, so the choosen game performance indicators and
+other modell variables explain more than a half of players salary. Limitations 
+of the modell is that it does not take into account other variables
+which may be important for the salary. 
+
+------
+
+# Final Plots and Summary
+
+### Plot One
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, Plot_One}
+# salary sqrt transformed histogram
+ggplot(aes(x = salary_infl), data = nba_stats_salar) + 
+  geom_histogram(binwidth = 0.2) + 
+  scale_x_continuous(trans = sqrt_trans(), 
+                     breaks = c(0.2, 0.5, 1, 2.5, 5, 10, 20, 30)) +
+  scale_y_continuous(breaks = c(50, 100, 150, 200, 250)) +
+  ggtitle('Salary histogram sqrt transformed') + 
+  xlab('Salary (adj. for inflation) in million USD') +
+  ylab('Number of players')
+
+```
+
+### Description One
+
+The distribution of NBA players salaries appears to have a bimodal shape on a 
+square root scale. The distribution is skewed to the right with only a small
+number of players earning over 20 milllion USD. 
+
+### Plot Two
+```{r echo=FALSE, message=FALSE, warning=FALSE, Plot_Two}
+# Salary box plots
+# Box plot position
+boxplot(salary_infl ~ Pos , data = nba_stats_salar, 
+        main ='Salary by position', 
+        xlab = 'Position', ylab = 'Points per game', 
+        col = "lightgrey", par(las = 1))
+
+# Box plot career year
+boxplot(salary_infl ~ career_year , data = nba_stats_salar, 
+        main = 'Salary by career year', 
+        xlab = 'career year', 
+        ylab = 'Salary (adj. for inflation) in million USD', 
+        col = "lightgrey", par(las = 1))
+
+```
+
+### Description Two
+
+Salaries vary across positions and along with the career progress. Center
+players and power forwards earn most measured by the interquartile range, but at
+the same time salaries of players in other positions show much more outliers at
+the top. Salaries of younger players in their first to third year tend to be 
+much smaller compared to those with more advanced careers.
+
+### Plot Three
+```{r echo=FALSE, warning=FALSE, message=FALSE, warning=FALSE, Plot_Three}
+# Salary and Points per game 
+ggplot(aes(x = PPG, y = salary_infl, color = stayed), data = nba_stats_salar) + 
+geom_jitter(alpha = 0.25) + 
+  scale_x_continuous() + 
+  scale_y_continuous(trans = sqrt_trans(), limits = 
+                       c(quantile(nba_stats_salar$salary_infl, 0.01), 
+                             quantile(nba_stats_salar$salary_infl, 0.99)), 
+                     breaks = c(1, 5, 10, 20)) + 
+  ggtitle('Salary (sqrt) vs. points per game') +
+  geom_smooth(method = 'lm') + facet_wrap(~Pos) + 
+  xlab('Points per game') + ylab('Salary (adj. for inflation) in million USD') +
+  scale_colour_discrete(name  ="Stayed with the team?",
+                          breaks=c(TRUE, FALSE),
+                          labels=c("Yes", "No")) + 
+  theme(legend.text = element_text(size = 12), legend.position = c(0.88,0.12))
+
+```
+
+### Description Three
+
+Players salary (transformed using square root function) and diverse game
+performance indicators appear to be related to each other. Here an example of 
+the relationship between salary and points per game is shown. Different 
+performance metrics showed different relationships to players salary across 
+different positions. I used some of the per game performance indicators such as 
+2 and 3 point goals, free throws, blocks, assists, rebounds and steals along
+with career year and 'stayed' variable to build a linear regression model. The
+stayed variable represents the fact whether or not the player changed the team 
+within or after the season. The modell explains about 60% of players salary 
+(based on all players) and deliver slightly different results across positions 
+with the highest R² of approx. 0.63 for point guards and power forwards. The 
+modell fails to explain the rest of salary since there might be other factors 
+influencing the salary ranging from salary cap rules to player's agent's ability
+to negotiate.
+
+------
+
+# Reflection
+
+The NBA salaries and performance dataset contains salaries of NBA players over
+the last 10 years along with their average game performance metrics and some
+other players charateristics such as age, weight and height. I started by
+understanding choosen variables in the dataset using univariate plots as well as
+how variables are connected to each other using bivariate and multivariate 
+plots. I then tried to build a modell explaining NBA salaries through player's
+performance and experience.
+
+I went through some struggles trying to understand how variables in the dataset
+are related to each other and influenced by each other with an example of the 
+position variable influencing one or another performance indicator. Another 
+challenge was to understand the structure of different datasets I used as input 
+in the beginning to pull together the final dataset used for analysis here. As I 
+was expecting the salary is connected to players performance. At the same time
+performance indicators vary across positions. It was a surprise to me that 
+players who stay with their teams earn more on average than those who change 
+teams.
+
+Future work which can be done using the dataset is exploring other variables 
+in the dataset, trying to build a better modell which could explain more than 
+just 60% of the salary by finding and incorporating new variables.

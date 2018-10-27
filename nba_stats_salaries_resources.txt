@@ -1,0 +1,8 @@
+Resources:
+
+https://www.kaggle.com/drgilermo/nba-players-stats/home
+https://data.world/datadavis/nba-salaries/
+https://www.basketball-reference.com/
+https://www.tidyverse.org/
+https://www.r-bloggers.com/
+http://www.cookbook-r.com/
